@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urljoin
 
-from lxml import html
+from lxml import etree, html
 
 
 def extract_links(content: str, base_url: str) -> list[str]:
@@ -20,5 +20,5 @@ def extract_links(content: str, base_url: str) -> list[str]:
             if resolved.startswith("http://") or resolved.startswith("https://"):
                 links.append(resolved)
         return links
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, etree.ParserError, etree.XMLSyntaxError):
         return []
