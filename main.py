@@ -1,12 +1,20 @@
 from collections import deque
 from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
+import logging
 import random
 import sys
 import time
 
 import requests
 from lxml import etree, html
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -52,12 +60,13 @@ class Crawler:
                 delay = self.robots.crawl_delay("*")
                 if delay:
                     self.delay = max(self.delay, delay)
-                print(f"Loaded robots.txt (crawl-delay: {self.delay}s)")
+                logger.info(f"Loaded robots.txt (crawl-delay: {self.delay}s)")
             else:
-                self.robots.parse([]) 
-        except Exception:
+                self.robots.parse([])
+                logger.debug("No robots.txt found (404)")
+        except Exception as e:
             self.robots.parse([])
-            print("No robots.txt found, allowing all")
+            logger.debug(f"Failed to load robots.txt: {e}")
 
     def _load_sitemaps(self):
         sitemap_urls = []
@@ -70,7 +79,7 @@ class Crawler:
             self._parse_sitemap(sitemap_url)
 
         if self.seen_urls:
-            print(f"Loaded {len(self.seen_urls)} URLs from sitemaps")
+            logger.info(f"Loaded {len(self.seen_urls)} URLs from sitemaps")
 
     def _parse_sitemap(self, sitemap_url: str):
         try:
@@ -141,7 +150,7 @@ class Crawler:
             response.raise_for_status()
             return response.text
         except Exception as e:
-            print(f"Error fetching {url}: {e}")
+            logger.warning(f"Failed to fetch {url}: {e}")
             return None
 
     def extract_links(self, content: str, base_url: str) -> list[str]:
@@ -163,11 +172,7 @@ class Crawler:
                 continue
             links = self.extract_links(content, url)
             added = self.add_urls(links)
-            print({
-                "current": url,
-                "queue_len": len(self.queue),
-                "new_urls": added,
-            })
+            logger.info(f"Crawled {url} | queue: {len(self.queue)} | new: {added}")
             if self.queue:
                 time.sleep(self.delay)
 
@@ -177,5 +182,7 @@ if __name__ == "__main__":
         print("Usage: python main.py <start_url>")
         sys.exit(1)
 
+    logger.info(f"Starting crawl: {sys.argv[1]}")
     crawler = Crawler(sys.argv[1])
     crawler.run()
+    logger.info(f"Crawl complete. Total URLs: {len(crawler.seen_urls)}")
