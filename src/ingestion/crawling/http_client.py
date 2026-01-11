@@ -40,3 +40,12 @@ class HttpClient:
             logger.warning(f"Failed to fetch {url}: {e}")
             status_code = e.response.status_code if e.response is not None else None
             return None, status_code, str(e)
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self) -> HttpClient:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
