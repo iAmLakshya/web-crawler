@@ -1,0 +1,23 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+from uuid import UUID
+
+from src.domain.models import CrawlSource, CrawlSourceCreate, SourceStatus
+
+
+class SourceRepository(Protocol):
+    def create(self, source: CrawlSourceCreate) -> CrawlSource: ...
+
+    def get_by_id(self, id: UUID) -> CrawlSource | None: ...
+
+    def list(self, status: SourceStatus | None = None) -> list[CrawlSource]: ...
+
+    def update_status(self, id: UUID, status: SourceStatus) -> CrawlSource: ...
+
+    def update_next_run(self, id: UUID, next_run_at: datetime) -> CrawlSource: ...
+
+    def delete(self, id: UUID) -> None: ...
+
+    def get_due_sources(self) -> list[CrawlSource]: ...

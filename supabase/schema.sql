@@ -108,3 +108,72 @@ alter table crawl_runs enable row level security;
 alter table crawled_pages enable row level security;
 alter table parsed_pages enable row level security;
 alter table crawl_queue enable row level security;
+
+-- RPC: Atomically claim queue items using FOR UPDATE SKIP LOCKED
+create or replace function claim_queue_items(
+    p_run_id uuid,
+    p_worker_id text,
+    p_limit int default 10
+)
+returns setof crawl_queue
+language plpgsql
+as $$
+begin
+    return query
+    with claimed as (
+        select id from crawl_queue
+        where run_id = p_run_id and status = 'pending'
+        order by priority desc, created_at
+        limit p_limit
+        for update skip locked
+    )
+    update crawl_queue q
+    set
+        status = 'processing',
+        worker_id = p_worker_id,
+        claimed_at = now(),
+        attempts = attempts + 1
+    from claimed c
+    where q.id = c.id
+    returning q.*;
+end;
+$$;
+
+-- RPC: Reset stale queue items that have been processing too long
+create or replace function reset_stale_queue_items(
+    p_timeout_minutes int default 5
+)
+returns int
+language plpgsql
+as $$
+declare
+    affected int;
+begin
+    update crawl_queue
+    set
+        status = 'pending',
+        worker_id = null,
+        claimed_at = null
+    where status = 'processing'
+        and claimed_at < now() - (p_timeout_minutes || ' minutes')::interval
+        and attempts < max_attempts;
+
+    get diagnostics affected = row_count;
+    return affected;
+end;
+$$;
+
+-- RPC: Get crawled pages that haven't been parsed yet
+create or replace function get_unparsed_pages(
+    p_limit int default 100
+)
+returns setof crawled_pages
+language sql
+as $$
+    select cp.*
+    from crawled_pages cp
+    left join parsed_pages pp on pp.page_id = cp.id
+    where pp.id is null and cp.content is not null
+    order by cp.crawled_at desc
+    limit p_limit;
+$$;
