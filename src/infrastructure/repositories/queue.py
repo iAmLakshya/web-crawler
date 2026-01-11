@@ -21,7 +21,8 @@ class SupabaseQueueRepository:
         if not items:
             return []
         data = [item.model_dump(mode="json") for item in items]
-        result = self.table.insert(data).execute()
+        # Use upsert with ignore duplicates (on_conflict on unique index)
+        result = self.table.upsert(data, on_conflict="run_id,url_hash", ignore_duplicates=True).execute()
         return [QueueItem.model_validate(row) for row in result.data]
 
     def claim(self, run_id: UUID, worker_id: str, limit: int = 10) -> list[QueueItem]:
