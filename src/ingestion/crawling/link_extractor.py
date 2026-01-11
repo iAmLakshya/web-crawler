@@ -20,5 +20,5 @@ def extract_links(content: str, base_url: str) -> list[str]:
             if resolved.startswith("http://") or resolved.startswith("https://"):
                 links.append(resolved)
         return links
-    except Exception:
+    except (ValueError, TypeError):
         return []

@@ -73,7 +73,7 @@ class SitemapParser:
             if status_code != 200 or not content:
                 return
 
-            root = etree.fromstring(content.encode())
+            root = etree.fromstring(content.encode('utf-8', errors='replace'))
             ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 
             # Handle sitemap index (nested sitemaps)
