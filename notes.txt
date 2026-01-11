@@ -1,0 +1,4 @@
+scrappy
+urllib3
+xpath (lxml)
+mechanical soup
