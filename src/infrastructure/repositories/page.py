@@ -22,6 +22,13 @@ class SupabaseCrawledPageRepository:
         result = self.table.insert(data).execute()
         return CrawledPage.model_validate(result.data[0])
 
+    def create_batch(self, pages: list[CrawledPageCreate]) -> list[CrawledPage]:
+        if not pages:
+            return []
+        data = [page.model_dump(mode="json") for page in pages]
+        result = self.table.insert(data).execute()
+        return [CrawledPage.model_validate(row) for row in result.data]
+
     def get_by_id(self, id: UUID) -> CrawledPage | None:
         result = self.table.select("*").eq("id", str(id)).execute()
         if not result.data:

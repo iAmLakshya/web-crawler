@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -17,9 +19,17 @@ USER_AGENTS = [
 
 
 class HttpClient:
-    def __init__(self, timeout: int = 10):
+    def __init__(self, timeout: int = 10, max_workers: int = 10):
         self.timeout = timeout
-        self.session = requests.Session()
+        self.max_workers = max_workers
+        self._local = threading.local()
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    @property
+    def session(self) -> requests.Session:
+        if not hasattr(self._local, 'session'):
+            self._local.session = requests.Session()
+        return self._local.session
 
     def _random_user_agent(self) -> str:
         return random.choice(USER_AGENTS)
@@ -41,8 +51,26 @@ class HttpClient:
             status_code = e.response.status_code if e.response is not None else None
             return None, status_code, str(e)
 
+    def _download_with_url(self, url: str) -> tuple[str, str | None, int | None, str | None]:
+        """Download a URL and return the result with the URL included."""
+        content, status_code, error = self.download(url)
+        return url, content, status_code, error
+
+    def download_many(self, urls: list[str]) -> list[tuple[str, str | None, int | None, str | None]]:
+        """Download multiple URLs concurrently.
+
+        Args:
+            urls: List of URLs to download.
+
+        Returns:
+            List of tuples: (url, content, status_code, error)
+        """
+        results = list(self.executor.map(self._download_with_url, urls))
+        return results
+
     def close(self) -> None:
-        self.session.close()
+        self.executor.shutdown(wait=True)
+        # Thread-local sessions are cleaned up when threads end
 
     def __enter__(self) -> HttpClient:
         return self

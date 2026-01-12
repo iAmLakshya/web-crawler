@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from src.domain.models import (
@@ -19,6 +19,7 @@ from src.domain.ports import (
 )
 from src.domain.rules import extract_domain, get_base_url, normalize_url, url_hash
 from src.ingestion.crawling import (
+    DomainRateLimiter,
     HttpClient,
     RobotsHandler,
     SitemapParser,
@@ -47,6 +48,7 @@ class CrawlUseCase:
         batch_size: int = 10,
         max_depth: int = 10,
         max_pages: int = 1000,
+        concurrency: int = 5,
     ):
         self.source_repo = source_repo
         self.run_repo = run_repo
@@ -58,6 +60,7 @@ class CrawlUseCase:
         self.batch_size = batch_size
         self.max_depth = max_depth
         self.max_pages = max_pages
+        self.concurrency = concurrency
 
     def create_source(self, entry_url: str, source_type: str = "full_domain") -> None:
         source = CrawlSourceCreate(
@@ -67,6 +70,57 @@ class CrawlUseCase:
         )
         created = self.source_repo.create(source)
         logger.info(f"Created source: {created.id} for {created.domain}")
+
+    def _process_item(
+        self,
+        item: object,
+        source: object,
+        run: object,
+        robots,
+        rate_limiter: DomainRateLimiter,
+    ) -> tuple[CrawledPageCreate, list[QueueItemCreate], bool, object]:
+        """Process a single queue item. Returns (page, new_queue_items, success)."""
+        domain = extract_domain(item.url)
+        rate_limiter.acquire(domain)
+
+        content, status_code, error = self.http_client.download(item.url)
+
+        content_hash = None
+        if content:
+            content_hash = hashlib.sha256(content.encode('utf-8', errors='replace')).hexdigest()
+
+        page = CrawledPageCreate(
+            run_id=run.id,
+            source_id=source.id,
+            url=item.url,
+            url_hash=item.url_hash,
+            content=content,
+            content_hash=content_hash,
+            status_code=status_code,
+            error=error,
+        )
+
+        new_items = []
+        success = status_code is not None and 200 <= status_code < 300 and content is not None
+
+        if success:
+            if item.depth + 1 < self.max_depth:
+                links = extract_links(content, item.url)
+                for link in links:
+                    normalized = normalize_url(link)
+                    if extract_domain(normalized) != source.domain:
+                        continue
+                    if not robots.can_fetch(normalized):
+                        continue
+                    h = url_hash(normalized)
+                    new_items.append(QueueItemCreate(
+                        run_id=run.id,
+                        url=normalized,
+                        url_hash=h,
+                        depth=item.depth + 1,
+                    ))
+
+        return page, new_items, success, item
 
     def start_run(self, source_id) -> CrawlResult:
         source = self.source_repo.get_by_id(source_id)
@@ -83,10 +137,10 @@ class CrawlUseCase:
         robots = RobotsHandler(base_url, self.http_client)
         sitemap_parser = SitemapParser(self.http_client)
 
-        # Respect crawl delay from robots.txt
-        effective_delay = self.delay
+        # Setup rate limiter with crawl delay from robots.txt
+        rate_limiter = DomainRateLimiter(default_delay=self.delay)
         if robots.crawl_delay:
-            effective_delay = max(self.delay, robots.crawl_delay)
+            rate_limiter.set_delay(source.domain, max(self.delay, robots.crawl_delay))
 
         # Seed queue from sitemaps
         sitemap_urls = []
@@ -118,84 +172,69 @@ class CrawlUseCase:
             self.queue_repo.add_batch(queue_items)
             logger.info(f"Seeded queue with {len(queue_items)} URLs")
 
-        # Process queue
+        # Process queue with concurrency
         pages_crawled = 0
         pages_failed = 0
 
-        while True:
-            # Check max pages limit
-            if pages_crawled + pages_failed >= self.max_pages:
-                logger.info(f"Reached max pages limit ({self.max_pages}), stopping crawl")
-                break
-            items = self.queue_repo.claim(run.id, self.worker_id, self.batch_size)
-            if not items:
-                break
+        with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+            while True:
+                # Check max pages limit
+                if pages_crawled + pages_failed >= self.max_pages:
+                    logger.info(f"Reached max pages limit ({self.max_pages}), stopping crawl")
+                    break
 
-            for item in items:
-                content, status_code, error = self.http_client.download(item.url)
+                items = self.queue_repo.claim(run.id, self.worker_id, self.batch_size)
+                if not items:
+                    break
 
-                # Store page
-                content_hash = None
-                if content:
-                    content_hash = hashlib.sha256(content.encode('utf-8', errors='replace')).hexdigest()
+                # Process batch concurrently
+                futures = {
+                    executor.submit(
+                        self._process_item, item, source, run, robots, rate_limiter
+                    ): item
+                    for item in items
+                }
 
-                page = CrawledPageCreate(
-                    run_id=run.id,
-                    source_id=source.id,
-                    url=item.url,
-                    url_hash=item.url_hash,
-                    content=content,
-                    content_hash=content_hash,
-                    status_code=status_code,
-                    error=error,
+                pages_to_insert = []
+                all_new_queue_items = []
+
+                for future in as_completed(futures):
+                    try:
+                        page, new_items, success, item = future.result()
+                        pages_to_insert.append(page)
+                        all_new_queue_items.extend(new_items)
+
+                        if success:
+                            self.queue_repo.complete(item.id)
+                            pages_crawled += 1
+                            logger.info(f"Crawled {item.url}")
+                        else:
+                            self.queue_repo.fail(item.id, page.error)
+                            pages_failed += 1
+
+                    except Exception as e:
+                        item = futures[future]
+                        logger.exception(f"Error processing {item.url}")
+                        self.queue_repo.fail(item.id, str(e))
+                        pages_failed += 1
+
+                # Batch insert pages
+                if pages_to_insert:
+                    self.page_repo.create_batch(pages_to_insert)
+
+                # Batch add new URLs to queue
+                if all_new_queue_items:
+                    added = self.queue_repo.add_batch(all_new_queue_items)
+                    if added:
+                        logger.debug(f"Added {len(added)} new URLs to queue")
+
+                # Update run stats
+                self.run_repo.update_stats(
+                    run.id,
+                    pages_found=pages_crawled + pages_failed,
+                    pages_crawled=pages_crawled,
+                    pages_failed=pages_failed,
                 )
-                self.page_repo.create(page)
-
-                if status_code and 200 <= status_code < 300 and content:
-                    # Extract and queue new links
-                    links = extract_links(content, item.url)
-                    new_items = []
-
-                    # Check depth limit before adding new items
-                    if item.depth + 1 >= self.max_depth:
-                        logger.debug(f"Skipping link extraction at depth {item.depth}, max depth ({self.max_depth}) reached")
-                    else:
-                        for link in links:
-                            normalized = normalize_url(link)
-                            if extract_domain(normalized) != source.domain:
-                                continue
-                            if not robots.can_fetch(normalized):
-                                continue
-                            h = url_hash(normalized)
-                            new_items.append(QueueItemCreate(
-                                run_id=run.id,
-                                url=normalized,
-                                url_hash=h,
-                                depth=item.depth + 1,
-                            ))
-
-                    # Add new URLs (duplicates handled by upsert)
-                    if new_items:
-                        added = self.queue_repo.add_batch(new_items)
-                        if added:
-                            logger.debug(f"Added {len(added)} new URLs to queue")
-
-                    self.queue_repo.complete(item.id)
-                    pages_crawled += 1
-                    logger.info(f"Crawled {item.url}")
-                else:
-                    self.queue_repo.fail(item.id, error)
-                    pages_failed += 1
-
-                time.sleep(effective_delay)
-
-            # Update run stats
-            self.run_repo.update_stats(
-                run.id,
-                pages_found=pages_crawled + pages_failed,
-                pages_crawled=pages_crawled,
-                pages_failed=pages_failed,
-            )
 
         # Mark run complete
         self.run_repo.mark_completed(run.id)

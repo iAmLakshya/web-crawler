@@ -30,8 +30,11 @@ def main():
     # Run crawl command
     run_parser = subparsers.add_parser("run", help="Run a crawl for a source")
     run_parser.add_argument("source_id", type=UUID, help="Source ID to crawl")
-    run_parser.add_argument("--delay", type=float, default=0.5, help="Delay between requests")
-    run_parser.add_argument("--batch-size", type=int, default=10, help="Batch size for queue")
+    run_parser.add_argument("--delay", type=float, default=0.5, help="Delay between requests (seconds)")
+    run_parser.add_argument("--batch-size", type=int, default=10, help="Batch size for queue claims")
+    run_parser.add_argument("--concurrency", type=int, default=5, help="Number of concurrent requests")
+    run_parser.add_argument("--max-depth", type=int, default=10, help="Maximum crawl depth")
+    run_parser.add_argument("--max-pages", type=int, default=1000, help="Maximum pages to crawl")
 
     args = parser.parse_args()
 
@@ -62,6 +65,9 @@ def main():
         http_client=http_client,
         delay=getattr(args, "delay", 0.5),
         batch_size=getattr(args, "batch_size", 10),
+        concurrency=getattr(args, "concurrency", 5),
+        max_depth=getattr(args, "max_depth", 10),
+        max_pages=getattr(args, "max_pages", 1000),
     )
 
     if args.command == "create":
